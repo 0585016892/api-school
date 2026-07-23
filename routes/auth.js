@@ -7,7 +7,18 @@ const crypto = require("crypto"); // 🌟 BỔ SUNG: Import thư viện crypto �
 const auth = require("../middleware/auth");
 const admin = require("../middleware/admin");
 const db = require("../config/db");
-
+const ALLOWED_ROLES = [
+  "admin",
+  "principal",
+  "vice_principal",
+  "department_head",
+  "teacher",
+  "office_staff",
+  "union_president",
+  "school_council",
+  "student",
+  "parent",
+];
 // ================= CẤU HÌNH TRÌNH TỰ ĐỘNG GỬI MAIL (NODEMAILER) =================
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -203,32 +214,81 @@ router.post("/login", async (req, res) => {
 });
 router.post("/register", async (req, res) => {
   try {
-    const { username, password, role } = req.body;
+    const {
+      username,
+      password,
+      role = "student",
+      teacher_id = null,
+      student_id = null,
+      is_active = 1, // Mặc định là 1 (hoạt động)
+    } = req.body;
 
-    const hash = await bcrypt.hash(password, 10);
+    // 1. Kiểm tra đầu vào bắt buộc
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Vui lòng nhập đầy đủ tên tài khoản và mật khẩu",
+      });
+    }
 
-    await db.query(
-      `
-            INSERT INTO users
-            (
-                username,
-                password,
-                role
-            )
-            VALUES
-            (
-                ?,?,?
-            )
-            `,
-      [username, hash, role],
+    // 2. Kiểm tra xem username đã tồn tại trong hệ thống chưa
+    const [existingUser] = await db.query(
+      "SELECT id FROM users WHERE username = ?",
+      [username],
     );
 
-    res.json({
+    if (existingUser && existingUser.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Tên tài khoản này đã được sử dụng",
+      });
+    }
+
+    // 3. Mã hóa mật khẩu
+    const hash = await bcrypt.hash(password, 10);
+
+    // 4. Thêm tài khoản mới vào DB (created_at tự động lấy CURRENT_TIMESTAMP)
+    const [result] = await db.query(
+      `
+      INSERT INTO users (
+        username,
+        password,
+        role,
+        teacher_id,
+        student_id,
+        is_active
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      [
+        username.trim(),
+        hash,
+        role || "student",
+        teacher_id || null,
+        student_id || null,
+        is_active !== undefined ? is_active : 1,
+      ],
+    );
+
+    // 5. Trả về kết quả thành công
+    return res.status(201).json({
       success: true,
       message: "Tạo tài khoản thành công",
+      data: {
+        id: result.insertId,
+        username,
+        role: role || "student",
+        teacher_id: teacher_id || null,
+        student_id: student_id || null,
+        is_active: is_active !== undefined ? is_active : 1,
+      },
     });
   } catch (err) {
-    res.status(500).json(err);
+    console.error("REGISTER ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: err?.message || "Lỗi máy chủ nội bộ khi đăng ký tài khoản",
+    });
   }
 });
 
@@ -374,6 +434,55 @@ router.put("/unlock/:id", auth, admin, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json(err);
+  }
+});
+router.put("/:id/change-role", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    // 1. Kiểm tra xem role truyền lên có hợp lệ không
+    if (!role || !ALLOWED_ROLES.includes(role.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message: "Vai trò (role) không hợp lệ!",
+      });
+    }
+
+    const formattedRole = role.toLowerCase();
+
+    // 2. Kiểm tra xem user có tồn tại trong DB không
+    const [user] = await db.query("SELECT id, role FROM users WHERE id = ?", [
+      id,
+    ]);
+
+    if (!user || user.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy người dùng",
+      });
+    }
+
+    // 3. Cập nhật role mới trong Database
+    await db.query("UPDATE users SET role = ? WHERE id = ?", [
+      formattedRole,
+      id,
+    ]);
+
+    return res.json({
+      success: true,
+      message: "Cập nhật vai trò thành công",
+      data: {
+        id: Number(id),
+        newRole: formattedRole,
+      },
+    });
+  } catch (error) {
+    console.error("CHANGE ROLE ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Lỗi máy chủ khi cập nhật vai trò",
+    });
   }
 });
 module.exports = router;
